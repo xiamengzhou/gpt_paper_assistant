@@ -1,19 +1,18 @@
-import json
 import configparser
+import io
+import json
 import os
 import time
+from typing import Generator, TypeVar
 
-from openai import OpenAI
 from requests import Session
-from typing import TypeVar, Generator
-import io
 from tqdm import tqdm
 
-from arxiv_scraper import get_papers_from_arxiv_rss_api
+from arxiv_scraper import EnhancedJSONEncoder, get_papers_from_arxiv_rss_api
 from filter_papers import filter_by_author, filter_by_gpt
+from openai_utils import OPENAIBaseEngine
 from parse_json_to_md import render_md_string
 from push_to_slack import push_to_slack
-from arxiv_scraper import EnhancedJSONEncoder
 
 T = TypeVar("T")
 
@@ -179,20 +178,25 @@ if __name__ == "__main__":
     config.read("configs/config.ini")
 
     S2_API_KEY = os.environ.get("S2_KEY")
-    OAI_KEY = os.environ.get("OAI_KEY")
-    if OAI_KEY is None:
-        raise ValueError(
-            "OpenAI key is not set - please set OAI_KEY to your OpenAI key"
-        )
-    openai_client = OpenAI(api_key=OAI_KEY)
+    # OAI_KEY = os.environ.get("OAI_KEY")
+    # if OAI_KEY is None:
+    #     raise ValueError(
+    #         "OpenAI key is not set - please set OAI_KEY to your OpenAI key"
+    #     )
+    
+    # 0.28 opensi
+    openai_client = OPENAIBaseEngine("gpt-4-1106-preview") 
+    
     # load the author list
     with io.open("configs/authors.txt", "r") as fopen:
         author_names, author_ids = parse_authors(fopen.readlines())
     author_id_set = set(author_ids)
 
     papers = list(get_papers_from_arxiv(config))
+    
     # dump all papers for debugging
 
+    # TODO: pending S2 API key
     all_authors = set()
     for paper in papers:
         all_authors.update(set(paper.authors))

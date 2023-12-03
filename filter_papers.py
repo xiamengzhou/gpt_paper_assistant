@@ -7,11 +7,16 @@ from collections import defaultdict
 from typing import List
 
 import retry
-from openai import OpenAI
+
+try:
+    from openai import AzureOpenAI, OpenAI
+except:
+    pass
 from tqdm import tqdm
 
-from arxiv_scraper import Paper
-from arxiv_scraper import EnhancedJSONEncoder
+from api_credentials import get_credentials
+from arxiv_scraper import EnhancedJSONEncoder, Paper
+from openai_utils import OPENAIBaseEngine
 
 
 def filter_by_author(all_authors, papers, author_targets, config):
@@ -73,18 +78,12 @@ def call_chatgpt(full_prompt, openai_client, model, num_samples):
         seed=0,
     )
 
-
+def call_azure_chatgpt(full_prompt, openai_client):
+    prompt = [{"role": "user", "content": full_prompt}]
+    return openai_client.safe_completion(prompt=prompt)
+    
 def run_and_parse_chatgpt(full_prompt, openai_client, config):
-    # just runs the chatgpt prompt, tries to parse the resulting JSON
-    completion = call_chatgpt(
-        full_prompt,
-        openai_client,
-        config["SELECTION"]["model"],
-        config["FILTERING"]["num_samples"],
-    )
-    json_dicts = defaultdict(list)
-    for choice in completion.choices:
-        out_text = choice.message.content
+    def process_out_text(json_dicts, out_text):
         out_text = re.sub("```jsonl\n", "", out_text)
         out_text = re.sub("```", "", out_text)
         out_text = re.sub(r"\n+", "\n", out_text)
@@ -100,9 +99,31 @@ def run_and_parse_chatgpt(full_prompt, openai_client, config):
                     print("Exception happened " + str(ex))
                     print("Failed to parse LM output as json")
                     print(out_text)
-                    print("RAW output")
-                    print(completion.choices[0].message.content)
+                    # print("RAW output")
+                    # print(completion.choices[0].message.content)
                 continue
+        
+
+    json_dicts = defaultdict(list)
+
+    # just runs the chatgpt prompt, tries to parse the resulting JSON
+    # if isinstance(openai_client, AzureOpenAI) or isinstance(openai_client, OpenAI):
+    #     completion = call_chatgpt(
+    #         full_prompt,
+    #         openai_client,
+    #         config["SELECTION"]["model"],
+    #         config["FILTERING"]["num_samples"],
+    #     )
+    #     for choice in completion.choices:
+    #         out_text = choice.message.content
+    #     price = calc_price(config["SELECTION"]["model"], completion.usage)
+    # else:
+    completion = call_azure_chatgpt(full_prompt, openai_client)
+    out_text = completion["content"]
+    price = 0 
+
+    process_out_text(json_dicts, out_text)
+        
     all_dict = []
     for id, json_list in json_dicts.items():
         rel_score = sum([float(jdict["RELEVANCE"]) for jdict in json_list]) / float(
@@ -118,7 +139,7 @@ def run_and_parse_chatgpt(full_prompt, openai_client, config):
             "NOVELTY": nov_score,
         }
         all_dict.append(new_dict)
-    return all_dict, calc_price(config["SELECTION"]["model"], completion.usage)
+    return all_dict, price 
 
 
 def paper_to_string(paper_entry: Paper) -> str:
@@ -176,7 +197,7 @@ def paper_to_titles(paper_entry: Paper) -> str:
 
 
 def run_on_batch(
-    paper_batch, base_prompt, criterion, postfix_prompt, openai_client, config
+    paper_batch, base_prompt, criterion, postfix_prompt, client, config
 ):
     batch_str = [paper_to_string(paper) for paper in paper_batch]
     full_prompt = "\n".join(
@@ -187,7 +208,7 @@ def run_on_batch(
             postfix_prompt,
         ]
     )
-    json_dicts, cost = run_and_parse_chatgpt(full_prompt, openai_client, config)
+    json_dicts, cost = run_and_parse_chatgpt(full_prompt, client, config)
     return json_dicts, cost
 
 
@@ -223,7 +244,7 @@ def filter_by_gpt(
         for batch in tqdm(batch_of_papers):
             scored_in_batch = []
             json_dicts, cost = run_on_batch(
-                batch, base_prompt, criterion, postfix_prompt, openai_client, config
+                batch, base_prompt, criterion, postfix_prompt, client, config
             )
             all_cost += cost
             for jdict in json_dicts:
@@ -262,8 +283,19 @@ if __name__ == "__main__":
     config = configparser.ConfigParser()
     config.read("configs/config.ini")
     S2_API_KEY = os.environ.get("S2_KEY")
-    OAI_KEY = os.environ.get("OAI_KEY")
-    openai_client = OpenAI(api_key=OAI_KEY)
+    
+    # following the new version in https://github.com/openai/openai-python/blob/main/examples/azure.py
+    # has not worked yet
+    # openai.NotFoundError: Error code: 404 - {'error': {'code': '404', 'message': 'Resource not found'}}
+    # credential = get_credentials("gpt-4-1106-preview", azure=True) 
+    # client = AzureOpenAI(
+    #     api_version="gpt-4-1106-preview",
+    #     azure_endpoint=credential["api_args"]["api_base"],
+    # )
+     
+    # 0.28 opensi
+    client = OPENAIBaseEngine("gpt-4-1106-preview")
+    
     # deal with config parsing
     with open("configs/base_prompt.txt", "r") as f:
         base_prompt = f.read()
@@ -272,8 +304,7 @@ if __name__ == "__main__":
     with open("configs/postfix_prompt.txt", "r") as f:
         postfix_prompt = f.read()
     # loads papers from 'in/debug_papers.json' and filters them
-    # with open("in/debug_papers.json", "r") as f:
-    with open("in/gpt_paper_batches.debug-11-14.json", "r") as f:
+    with open("in/debug_papers.json", "r") as f:
         paper_list_in_dict = json.load(f)
     papers = [
         [
@@ -293,7 +324,7 @@ if __name__ == "__main__":
     total_cost = 0
     for batch in tqdm(papers):
         json_dicts, cost = run_on_batch(
-            batch, base_prompt, criterion, postfix_prompt, openai_client, config
+            batch, base_prompt, criterion, postfix_prompt, client, config
         )
         total_cost += cost
         for paper in batch:
@@ -304,8 +335,8 @@ if __name__ == "__main__":
                 **jdict,
             }
             sort_dict[jdict["ARXIVID"]] = jdict["RELEVANCE"] + jdict["NOVELTY"]
-
-        # sort the papers by relevance and novelty
+    
+    # sort the papers by relevance and novelty
     print("total cost:" + str(total_cost))
     keys = list(sort_dict.keys())
     values = list(sort_dict.values())

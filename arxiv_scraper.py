@@ -1,13 +1,13 @@
 import dataclasses
 import json
+import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from html import unescape
 from typing import List, Optional, Tuple
-import re
-import arxiv
 
+import arxiv
 import feedparser
-from dataclasses import dataclass
 
 
 class EnhancedJSONEncoder(json.JSONEncoder):
@@ -34,11 +34,11 @@ def is_earlier(ts1, ts2):
     return int(ts1.replace(".", "")) < int(ts2.replace(".", ""))
 
 
-def get_papers_from_arxiv_api(area: str, timestamp, last_id) -> List[Paper]:
+def get_papers_from_arxiv_api(area: str, timestamp, last_id="0.0", delta=1) -> List[Paper]:
     # grabs papers from the arxiv API endpoint.
     # we need this because the RSS feed is buggy, and drops some of the most recent papers silently.
     end_date = timestamp
-    start_date = timestamp - timedelta(days=4)
+    start_date = timestamp - timedelta(days=delta)
     search = arxiv.Search(
         query="("
         + area
@@ -52,6 +52,7 @@ def get_papers_from_arxiv_api(area: str, timestamp, last_id) -> List[Paper]:
     )
     results = list(arxiv.Client().results(search))
     api_papers = []
+
     for result in results:
         new_id = result.get_short_id()[:10]
         if is_earlier(last_id, new_id):
@@ -67,10 +68,10 @@ def get_papers_from_arxiv_api(area: str, timestamp, last_id) -> List[Paper]:
             api_papers.append(paper)
     return api_papers
 
-
-def get_papers_from_arxiv_rss(area: str, config: Optional[dict]) -> Tuple[List[Paper], datetime, str]:
+def get_papers_from_arxiv_rss(area: str, config: Optional[dict], delta=1) -> Tuple[List[Paper], datetime, str]:
     # get the feed from http://export.arxiv.org/rss/ and use the updated timestamp to avoid duplicates
-    updated = datetime.utcnow() - timedelta(days=1)
+    updated = datetime.utcnow() - timedelta(days=delta) 
+
     # format this into the string format 'Fri, 03 Nov 2023 00:30:00 GMT'
     updated_string = updated.strftime("%a, %d %b %Y %H:%M:%S GMT")
     feed = feedparser.parse(
@@ -96,7 +97,7 @@ def get_papers_from_arxiv_rss(area: str, config: Optional[dict]) -> Tuple[List[P
             continue
         # extract area
         paper_area = re.findall("\[.*\]", paper.title)[0]
-        if (f'[{area}]' != paper_area) and (config["FILTERING"].getboolean("force_primary")):
+        if (f'[{area}]' != paper_area) and config is not None and (config["FILTERING"].getboolean("force_primary")):
             continue
         # otherwise make a new paper, for the author field make sure to strip the HTML tags
         authors = [
@@ -116,7 +117,6 @@ def get_papers_from_arxiv_rss(area: str, config: Optional[dict]) -> Tuple[List[P
 
     return paper_list, timestamp, last_id
 
-
 def merge_paper_list(paper_list, api_paper_list):
     api_set = set([paper.arxiv_id for paper in api_paper_list])
     merged_paper_list = api_paper_list
@@ -127,15 +127,17 @@ def merge_paper_list(paper_list, api_paper_list):
 
 
 def get_papers_from_arxiv_rss_api(area: str, config: Optional[dict]) -> List[Paper]:
-    paper_list, timestamp, last_id = get_papers_from_arxiv_rss(area, config)
+    delta = config["FILTERING"].getint("delta")
+    paper_list, timestamp, last_id = get_papers_from_arxiv_rss(area, config, delta)
     if timestamp is None:
         return []
-    api_paper_list = get_papers_from_arxiv_api(area, timestamp, last_id)
+    api_paper_list = get_papers_from_arxiv_api(area, timestamp, last_id, delta)
     merged_paper_list = merge_paper_list(paper_list, api_paper_list)
     return merged_paper_list
 
 
 if __name__ == "__main__":
-    paper_list = get_papers_from_arxiv_rss("math.AC", None)
-    print(paper_list)
+    paper_list = get_papers_from_arxiv_api("cs.CL", datetime.utcnow(), delta=10)
+    n_papers = len(paper_list)
+    print("found", n_papers, "papers") 
     print("success")
